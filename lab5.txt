@@ -1,0 +1,315 @@
+Task 3: Configure ePBR Service Node and Policy
+You will enable the ePBR feature, configure a service node, define a policy and apply the policy to the respective SVIs on the vPC pair leaf-a and leaf-b.
+Activity
+Step 1: On leaf-a and leaf-b, enable the SLA sender and ePBR features, and configure an ePBR service with the following settings:
+
+    Service name: asa1
+    VRF: tenant1_vrf. This address space has to encompass the clients, servers, service node and probes.
+    Service endpoint for forward traffic:
+        IP address: 10.91.91.253. This is ASA inside address.
+        Interface: VLAN 111. The SVI, to which ASA inside interface is attached. It could be a Layer 3 routed interface as well.
+        Probe: ICMP. Other supported protocols include TCP, UDP, DNS, and HTTP. ePBR also supports user-defined tracks. You could manually create an object track and attach it to a service device.
+        Probe source interface: Loopback11. Specifying the source interface ensures probe connectivity in an anycast gateway environment.
+    Service endpoint for reverse traffic:
+        IP address: 10.92.92.253. This is ASA outside address.
+        Interface: VLAN 112. The SVI, to which ASA outside interface is attached.
+        Probe: ICMP
+        Probe source interface: Loopback12
+
+leaf-a(config), leaf-b(config)#
+feature sla sender
+feature epbr
+epbr service asa1
+  vrf tenant1_vrf
+service-end-point ip 10.91.91.253 interface Vlan111
+   probe icmp source-interface loopback 11
+reverse ip 10.92.92.253 interface Vlan112
+  probe icmp source-interface loopback 12
+Step 2: On leaf-a and leaf-b, configure an ACL to select traffic for redirection. Match TCP traffic from the network 192.168.1.0/24 to the network 192.168.2.0/24.
+leaf-a(config), leaf-b(config)#
+ip access-list inspect-acl
+  10 permit tcp 192.168.1.0/24 192.168.2.0/24
+Step 3: On leaf-a and leaf-b, configure an ePBR policy with the following settings:
+
+    Policy name: firewall
+    Enable statistics collection
+    Match the traffic using the ACL (TCP from 192.168.1.0/24 to 192.168.2.0/24)
+    Fail action: Drop. In this option, traffic is dropped when the service node becomes unreachable. Other options are:
+        Bypass: Traffic is redirected to the next service sequence when there is a failure of the current sequence.
+        Forward: Default option where traffic should use the regular routing tables.
+
+leaf-a(config), leaf-b(config)#
+epbr policy firewall
+ statistics
+  match ip address inspect-acl
+    10 set service asa1 fail-action drop
+An ePBR policy:
+
+    Often defines a chain of services that should be applied to the selected traffic, for example a firewall, an IPS, and a load balancer, processed in sequential manner. Each service in the chain could use a different fail-action.
+    Can include multiple match statements, effectively redirecting each traffic type via the appropriate service chain.
+    Can define a load-balance method.
+
+Step 4: On leaf-a and leaf-b, apply the policy to the following interfaces:
+
+    Forward policy interface: VLAN11. Traffic from clients attached to this SVI will be redirected to the service device.
+    Reverse policy interface: VLAN12. Return traffic from servers attached to this SVI will be redirected to the service device, to ensure flow symmetry.
+
+leaf-a(config), leaf-b(config)#
+interface vlan11
+  epbr ip policy firewall
+interface vlan12
+  epbr ip policy firewall reverse
+Apart from attaching a policy to a tenant Layer 2 SVI, as in this scenario, you could assign it to Layer 3 interfaces or L3VNI SVIs. You will do that later.
+Assigning the policy in the reverse direction is optional, superfluous with one-arm load-balancers and similar solutions. When configured, it autogenerates reverse redirection rules for return traffic.
+Step 5: Use PuTTY to connect over SSH to a Linux endpoint in VLAN 11, such as 1-2. The hostname will be resolved to the management IP address 10.10.1.212. Log in as admin with password 1234QWer. Verify the ASA inside interface. Connect via SSH to a server such as 192.168.2.1, 192.168.2.2, or 192.168.2.12.
+[admin@1-2 ~]$ ping 10.91.91.253
+PING 10.91.91.253 (10.91.91.253) 56(84) bytes of data.
+64 bytes from 10.91.91.253: icmp_seq=1 ttl=254 time=0.843 ms
+64 bytes from 10.91.91.253: icmp_seq=2 ttl=254 time=1.09 ms
+[admin@1-2 ~]$ ssh 192.168.2.1
+admin@192.168.2.1's password:
+The endpoints in the 192.168.1.0/24 network act as the clients of the ePBR service. The endpoints in the 192.168.2.0/24 network act as servers.
+You do not need to log in. Getting the authentication prompt validates a successful connection. You should initiate SSH from a client in network 192.168.1.0/24 attached to the vPC pair (endpoints 1-1, 1-2, 1-12) to an endpoint in network 192.168.2.0/24 attached to the vPC pair (2-1, 2-2, 2-12).
+If the SSH session fails, check connectivity to other endpoints in 192.168.1.0/24. Also, use PuTTY to connect to 2-1, verify connectivity to the ASA outside interface and other endpoints in 192.168.2.0/24.
+Step 6: On ASA1, verify that the SSH traffic is really going through the firewall.
+asa1# show conn
+2 in use, 5 most used
+
+TCP outside  192.168.2.1:22 inside  192.168.1.2:40392, idle 0:02:15, bytes 3486, flags UFRIO
+You will see different flows if you establish connection among other endpoints. Only TCP flows will appear in this list, because the redirect ACL matches only TCP traffic. ICMP traffic would be routed directly in the fabric and will not appear in the ASA connection table.
+If the flows fail, you can use these troubleshooting tools:
+
+    Watch the ACL hits on the ASA (show access-list)
+    Use the sudo tcpdump -ni ens192 tcp command on the server. This will tell you if the server is receiving TCP SYNs and responding to them.
+
+Step 7: On leaf-a and leaf-b, verify the ePBR configuration.
+leaf-a, leaf-b# show running epbr
+<... output omitted ...>
+feature epbr
+
+interface Vlan11
+  epbr ip policy firewall
+
+interface Vlan12
+  epbr ip policy firewall reverse
+
+epbr service asa1
+  vrf tenant1_vrf
+  service-end-point ip 10.91.91.253 interface Vlan111
+     probe icmp source-interface loopback11
+    reverse ip 10.92.92.253 interface Vlan112
+       probe icmp source-interface loopback12
+
+epbr policy firewall
+  statistics
+  match ip address inspect-acl
+    10 set service asa1 fail-action drop
+This output provides an overview of the entire ePBR configuration, except the redirect ACL.
+Step 8: On leaf-a and leaf-b, verify the ePBR policy applied in both directions.
+leaf-a, leaf-b# show epbr policy
+
+Policy-map : firewall
+  Match clause:
+    ip address (access-lists): inspect-acl
+  Service chain:
+    service asa1, sequence 10, fail-action Drop
+      IP 10.91.91.253 track 1 [UP]
+  Policy Interfaces:
+    Vlan11
+
+    10 set service asa1 fail-action drop
+leaf-a, leaf-b# show epbr policy reverse
+
+Policy-map : firewall
+  Match clause:
+    ip address (access-lists): inspect-acl
+  Service chain:
+    service asa1, sequence 10, fail-action Drop
+      IP 10.92.92.253 track 2 [UP]
+  Policy Interfaces:
+    Vlan12
+This output describes the applied ePBR policy and the health state of the service device in the appropriate direction. The traffic will fail if either probe fails.
+Step 9: On leaf-a and leaf-b, verify the ePBR policy statistics in both directions.
+leaf-a, leaf-b# show epbr statistics policy firewall
+
+Policy-map firewall, match inspect-acl
+
+    Bucket count: 1
+
+      traffic match : epbr_firewall_1_fwd_bucket_1
+        asa1 : 20
+leaf-a, leaf-b# show epbr statistics policy firewall reverse
+
+Policy-map firewall, match inspect-acl
+
+    Bucket count: 1
+
+      traffic match : epbr_firewall_1_rev_bucket_1
+        asa1 : 37
+To see the counters increment, you need to authenticate an SSH session. You may also establish other TCP sessions, such as Telnet.
+Step 10: On leaf-a and leaf-b, verify the autogenerated ACLs.
+leaf-a, leaf-b# show ip access-lists dynamic
+
+IP access list epbr_firewall_1_fwd_bucket_1
+        10 permit tcp 192.168.1.0 0.0.0.255 192.168.2.0 0.0.0.255
+IP access list epbr_firewall_1_rev_bucket_1
+        10 permit tcp 192.168.2.0 0.0.0.255 192.168.1.0 0.0.0.255
+IP access list sl_def_acl
+        statistics per-entry
+        10 deny tcp any any eq telnet syn
+        20 deny tcp any any eq www syn
+        30 deny tcp any any eq 22 syn
+        40 permit ip any any
+You should see two ACLs used by this policy, in the forward and reverse direction. The reverse ACL is used to match the return traffic.
+If you enable load-balancing in your ePBR policy, multiple ACLs will be generated in each direction, for the configured number of the load sharing buckets.
+Step 11: On leaf-a and leaf-b, verify the IP SLA tracks and sender configuration and cross-check the information with the ePBR policy details.
+leaf-a, leaf-b# show running-config track
+<... output omitted ...>
+
+track 1 ip sla 20001 reachability
+ delay up 30 down 30
+
+track 2 ip sla 20002 reachability
+ delay up 30 down 30
+leaf-a, leaf-b# show running-config sla sender
+<... output omitted ...>
+feature sla sender
+
+ip sla 20001
+  icmp-echo 10.91.91.253 source-ip 192.168.11.1
+    vrf tenant1_vrf
+    frequency 10
+ip sla schedule 20001 life forever start-time now
+ip sla 20002
+  icmp-echo 10.92.92.253 source-ip 192.168.12.1
+    vrf tenant1_vrf
+    frequency 10
+ip sla schedule 20002 life forever start-time now
+The ePBR policy uses tracks to monitor of the health of the forward and reverse path. The tracks, in turn, use the IP SLA sender configuration. Optionally, you may use other IP SLA commands to verify the resulting configuration.
+Step 12: On leaf-a and leaf-b, verify the Route Policy Manager (RPM) information.
+leaf-a, leaf-b# show running-config rpm
+<... output omitted ...>
+feature pbr
+
+route-map epbr_rmap_v4_Vlan11 pbr-statistics
+route-map epbr_rmap_v4_Vlan11 permit 701
+  match ip address epbr_firewall_1_fwd_bucket_1
+  set ip next-hop verify-availability 10.91.91.253 track 1 force-order drop-on-fail
+route-map epbr_rmap_v4_Vlan12 pbr-statistics
+route-map epbr_rmap_v4_Vlan12 permit 1051
+  match ip address epbr_firewall_1_rev_bucket_1
+  set ip next-hop verify-availability 10.92.92.253 track 2 force-order drop-on-fail
+route-map fabric-rmap-redist-subnet permit 10
+  match tag 12345
+
+interface Vlan11
+  ip policy route-map epbr_rmap_v4_Vlan11
+
+interface Vlan12
+  ip policy route-map epbr_rmap_v4_Vlan12
+The RPM displays the underlying route-map configuration.
+Task 4: Configure ePBR in Entire Site1
+ePBR is currently supported in a single fabric only, so you cannot extend it to multi-site. In this task, you will configure ePBR on leaf-c and on the Layer 3 VNI, to ensure consistent operation across the entire site.
+You will examine connectivity on two Linux endpoints attached to leaf-c:
+
+    1-3, with fabric IP address 192.168.1.3, acting as client
+    2-3, with fabric IP address 192.168.2.3, acting as server
+
+Note
+Although not needed in this scenario, changing an active ePBR configuration involves starting a ePBR session with the epbr session command, and then committing the changes using the commit command.
+Step 1: Use PuTTY to connect to 1-3. The hostname will be resolved to management IP address 10.10.1.213. Log in as admin with password 1234QWer and test SSH connectivity to endpoints in 192.168.2.0/24, such as 192.168.2.1, attached to leaf-a, and 192.168.2.3, attached to leaf-c.
+[admin@1-3 ~]$ ssh 192.168.2.1
+ssh: connect to host 192.168.2.1 port 22: Connection timed out
+[admin@1-3 ~]$ ssh 192.168.2.3
+The authenticity of host '192.168.2.3 (192.168.2.3)' can't be established.
+ECDSA key fingerprint is SHA256:CtE4ZOntdoeJ99fn5hd7ccxGKkKUtb3jbSzhr3goiRI.
+ECDSA key fingerprint is MD5:8e:a4:3d:e7:cb:f2:9a:b1:42:b6:9c:0d:44:c5:75:15.
+Are you sure you want to continue connecting (yes/no)?
+Why does the session to 192.168.2.3 work while the session to 192.168.2.1 fails?
+Step 2: On ASA1, examine the connection table.
+asa1# show conn
+1 in use, 5 most used
+Although you may still some sessions established between endpoints attached to the vPC pair, the connection to 192.168.2.3 is routed directly via the fabric and does not go through the ASA. The other sessions fail, because the vPC leaf pair is configured for ePBR while leaf-c is not.
+Step 3: On leaf-c, enable the SLA sender and ePBR features. Configure a service that is reachable via the L3VNI:
+
+    Service name: asa1
+    VRF: tenant1_vrf.
+    Service endpoint for forward traffic:
+        IP address: 10.91.91.253
+        Interface: VLAN 1001. From leaf-c perspective, this Layer 3 VNI provides the path towards the service node that is attached to the vPC leaf pair.
+        Probe: ICMP
+        Probe source interface: Loopback11
+    Service endpoint for reverse traffic:
+        IP address: 10.92.92.253
+        Interface: VLAN 1001
+        Probe: ICMP
+        Probe source interface: Loopback12
+
+leaf-c(config)#
+feature sla sender
+feature epbr
+epbr service asa1
+  vrf tenant1_vrf
+service-end-point ip 10.91.91.253 interface Vlan1001
+   probe icmp source-interface loopback 11
+reverse ip 10.92.92.253 interface Vlan1001
+  probe icmp source-interface loopback 12
+Step 4: On leaf-c, configure an ACL to select redirected traffic. Use the same traffic definition as on leaf-a and leaf-b.
+leaf-c(config)#
+ip access-list inspect-acl
+  10 permit tcp 192.168.1.0/24 192.168.2.0/24
+Step 5: On leaf-c, configure an ePBR policy with the following settings, identical to the ePBR policy on leaf-a and leaf-b:
+
+    Policy name: firewall
+    Enable statistics collection
+    Match the traffic using the ACL (TCP from 192.168.1.0/24 to 192.168.2.0/24)
+    Fail action: Drop.
+
+leaf-c(config)#
+epbr policy firewall
+ statistics
+  match ip address inspect-acl
+    10 set service asa1 fail-action drop
+Step 6: On leaf-c, apply the policy in the same way as on leaf-a and leaf-b:
+
+    Forward policy interface: VLAN11.
+    Reverse policy interface: VLAN12. 
+
+leaf-c(config)#
+interface vlan11
+  epbr ip policy firewall
+interface vlan12
+  epbr ip policy firewall reverse
+Step 7: On 1-3, retest if the SSH session to 192.168.2.3 is redirected through the ASA.
+[admin@1-3 ~]$ ssh 192.168.2.3
+The authenticity of host '192.168.2.3 (192.168.2.3)' can't be established.
+ECDSA key fingerprint is SHA256:CtE4ZOntdoeJ99fn5hd7ccxGKkKUtb3jbSzhr3goiRI.
+ECDSA key fingerprint is MD5:8e:a4:3d:e7:cb:f2:9a:b1:42:b6:9c:0d:44:c5:75:15.
+Are you sure you want to continue connecting (yes/no)?
+asa1# show conn
+1 in use, 5 most used
+The session from 1-3 to 2-3 still bypasses the firewall. Why?
+Note
+The TCP SYN is redirected over the Layer 3 VNI across the fabric. It is encapsulated in an appropriate VXLAN header to reach the vPC VTEP VIP but the inner IP header remains unchanged. When the redirected packet arrives at a vPC peer over the Layer 3 VNI, the packet is decapsulated and the vPC peer evaluates the inner header. Because there is no ePBR route map on the Layer 3 VNI interface, it is routed towards leaf-c, encapsulated in a VXLAN header and delivered to the destination. Although the packet was redirected to the vPC VTEP, it was not redirected to the ASA.
+Step 8: On leaf-a and leaf-b, apply the policy, in both directions to the Layer 3 VNI interface.
+leaf-a(config), leaf-b(config)#
+interface vlan1001
+  epbr ip policy firewall
+  epbr ip policy firewall reverse
+The policy must be applied to the Layer 3 VNI in both directions:
+
+    The forward direction will match traffic arriving from the clients and redirect it to ASA inside interface.
+    The reverse direction will match response traffic from the server. Instead of direct delivery to the client, it must be delivered to the ASA outside interface, to ensure flow symmetry.
+
+Step 9: On 1-3, retest if the SSH session to 192.168.2.3 is redirected through the ASA.
+[admin@1-3 ~]$ ssh 192.168.2.3
+The authenticity of host '192.168.2.3 (192.168.2.3)' can't be established.
+ECDSA key fingerprint is SHA256:CtE4ZOntdoeJ99fn5hd7ccxGKkKUtb3jbSzhr3goiRI.
+ECDSA key fingerprint is MD5:8e:a4:3d:e7:cb:f2:9a:b1:42:b6:9c:0d:44:c5:75:15.
+Are you sure you want to continue connecting (yes/no)?
+asa1# show conn
+2 in use, 5 most used
+
+TCP outside  192.168.2.3:22 inside  192.168.1.3:53190, idle 0:00:46, bytes 3230, flags UIO
+The session should go through the ASA.
+Step 10: Optionally, test other flows among the Linux endpoints and verify ePBR operation on leaf-c. This step completes the lab activity.
